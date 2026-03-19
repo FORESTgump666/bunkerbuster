@@ -1,0 +1,131 @@
+version: '3.9'
+
+services:
+  # PostgreSQL with TimescaleDB extension
+  postgres:
+    image: timescale/timescaledb:latest-pg15
+    container_name: bunkerbuster-postgres
+    environment:
+      POSTGRES_DB: bunkerbuster
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/migrations:/docker-entrypoint-initdb.d
+    networks:
+      - bunkerbuster-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache & Pub/Sub
+  redis:
+    image: redis:7-alpine
+    container_name: bunkerbuster-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    networks:
+      - bunkerbuster-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # PgAdmin for database management
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: bunkerbuster-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@bunkerbuster.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - bunkerbuster-network
+
+  # Redis Commander for cache inspection
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: bunkerbuster-redis-commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - bunkerbuster-network
+
+  # Backend API Server (Node.js/Express)
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: bunkerbuster-backend
+    ports:
+      - "5000:5000"
+    environment:
+      NODE_ENV: development
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: bunkerbuster
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      JWT_SECRET: dev-secret-change-in-prod
+      ADSB_API_URL: https://api.adsb.one
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+      - ./backend/logs:/app/logs
+    networks:
+      - bunkerbuster-network
+    restart: unless-stopped
+
+  # Worker / AI Agent Container (Python)
+  worker:
+    build:
+      context: ./ai-agents
+      dockerfile: Dockerfile
+    container_name: bunkerbuster-worker
+    environment:
+      PYTHONUNBUFFERED: 1
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/bunkerbuster
+      REDIS_URL: redis://redis:6379
+      ADSB_API_URL: https://api.adsb.one
+      LOG_LEVEL: INFO
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./ai-agents:/app
+      - ./data:/data
+    networks:
+      - bunkerbuster-network
+    restart: unless-stopped
+
+networks:
+  bunkerbuster-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
